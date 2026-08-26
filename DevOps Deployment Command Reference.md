@@ -50,7 +50,234 @@ On AWS, security groups do the same job as ufw at the network level. Use both �
 
 ---
 
-## 3. Nginx — the front door for all three stacks
+## 3. Where everything lives — file path map
+
+Paths below are for **Ubuntu / Debian**. Amazon Linux, RHEL and CentOS differ — see the note at the end of this section.
+
+### Learn to find paths yourself
+
+Memorising paths is fragile; these commands tell you the truth on the machine in front of you.
+
+```bash
+nginx -V 2>&1 | tr ' ' '\n' | grep conf-path    # where Nginx actually reads its config
+apache2ctl -S                                    # lists every vhost, its file, and line number
+php --ini                                        # which php.ini is loaded (CLI vs FPM differ!)
+systemctl cat nginx                              # the full unit file, including overrides
+systemctl show -p FragmentPath jenkins           # exact path of a service's unit file
+docker info | grep "Docker Root Dir"             # where Docker stores everything
+sudo lsof -p $(pgrep -f nginx | head -1)         # every file a running process has open
+```
+
+`apache2ctl -S` is the fastest way to answer "which config file is actually serving this domain?"
+
+### Nginx
+
+| What | Path |
+|---|---|
+| Main config | `/etc/nginx/nginx.conf` |
+| **Vhost files — write here** | `/etc/nginx/sites-available/myapp` |
+| **Enabled sites (symlinks)** | `/etc/nginx/sites-enabled/myapp` |
+| Also auto-loaded | `/etc/nginx/conf.d/*.conf` |
+| Reusable config fragments | `/etc/nginx/snippets/` |
+| Default access log | `/var/log/nginx/access.log` |
+| Default error log | `/var/log/nginx/error.log` |
+| Per-site logs (if you set them) | `/var/log/nginx/myapp_error.log` |
+| Default web root | `/var/www/html` |
+| PID file | `/run/nginx.pid` |
+
+A file in `sites-available` does nothing until symlinked into `sites-enabled`. That's the #1 "I edited the config and nothing changed" cause.
+
+### Apache
+
+| What | Path |
+|---|---|
+| Main config | `/etc/apache2/apache2.conf` |
+| **Vhost files — write here** | `/etc/apache2/sites-available/myapp.conf` |
+| **Enabled sites (`a2ensite`)** | `/etc/apache2/sites-enabled/myapp.conf` |
+| Modules available / enabled | `/etc/apache2/mods-available/` and `mods-enabled/` |
+| Extra configs (`a2enconf`) | `/etc/apache2/conf-available/` and `conf-enabled/` |
+| **Which ports it listens on** | `/etc/apache2/ports.conf` |
+| Log dir variable definition | `/etc/apache2/envvars` |
+| Access log | `/var/log/apache2/access.log` |
+| Error log | `/var/log/apache2/error.log` |
+| Other vhosts' access log | `/var/log/apache2/other_vhosts_access.log` |
+| Per-directory overrides | `.htaccess` inside your app directory |
+
+Apache vhost filenames **must end in `.conf`** or `a2ensite` ignores them.
+
+### PHP and PHP-FPM
+
+| What | Path |
+|---|---|
+| FPM config | `/etc/php/8.3/fpm/php.ini` |
+| **CLI config (a separate file!)** | `/etc/php/8.3/cli/php.ini` |
+| mod_php config | `/etc/php/8.3/apache2/php.ini` |
+| **Pool config — user, memory, workers** | `/etc/php/8.3/fpm/pool.d/www.conf` |
+| **The socket Nginx points at** | `/run/php/php8.3-fpm.sock` |
+| FPM error log | `/var/log/php8.3-fpm.log` |
+| Extension config files | `/etc/php/8.3/fpm/conf.d/` |
+
+Raising `upload_max_filesize` in the CLI ini and wondering why uploads still fail is a classic. Web requests use the **fpm** ini. Reload FPM after editing: `sudo systemctl reload php8.3-fpm`.
+
+### Laravel (inside your project)
+
+| What | Path |
+|---|---|
+| Environment / secrets | `<project>/.env` |
+| **Application log** | `<project>/storage/logs/laravel.log` |
+| Compiled caches | `<project>/bootstrap/cache/` |
+| Web root (point Nginx/Apache here) | `<project>/public/` |
+| Queue worker unit | `/etc/systemd/system/laravel-worker.service` |
+| Scheduler cron entry | `sudo crontab -u www-data -e` |
+
+### Node.js and PM2
+
+| What | Path |
+|---|---|
+| PM2 home | `~/.pm2/` |
+| PM2's own log | `~/.pm2/pm2.log` |
+| **App stdout / stderr** | `~/.pm2/logs/<app>-out.log`, `<app>-error.log` |
+| Saved process list (`pm2 save`) | `~/.pm2/dump.pm2` |
+| Startup unit (`pm2 startup`) | `/etc/systemd/system/pm2-ubuntu.service` |
+| Config file (optional) | `<project>/ecosystem.config.js` |
+
+PM2 logs live under the **user** who ran PM2. Running as `ubuntu` then looking in `/root/.pm2/` finds nothing.
+
+### systemd
+
+| What | Path |
+|---|---|
+| **Your custom units** | `/etc/systemd/system/myapp.service` |
+| Package-installed units | `/lib/systemd/system/` |
+| Drop-in overrides | `/etc/systemd/system/myapp.service.d/override.conf` |
+| Logs | `journalctl -u myapp` (no flat file) |
+
+After editing any unit: `sudo systemctl daemon-reload`.
+
+### SSL / Certbot
+
+| What | Path |
+|---|---|
+| **Certificate chain** | `/etc/letsencrypt/live/DOMAIN/fullchain.pem` |
+| **Private key** | `/etc/letsencrypt/live/DOMAIN/privkey.pem` |
+| Renewal settings per domain | `/etc/letsencrypt/renewal/DOMAIN.conf` |
+| Certbot log | `/var/log/letsencrypt/letsencrypt.log` |
+| Renewal timer | `systemctl list-timers \| grep certbot` |
+
+Paths under `live/` are symlinks that update on renewal — always reference `live/`, never the real file in `archive/`, or your config breaks after 90 days.
+
+### Docker
+
+| What | Path |
+|---|---|
+| **Everything Docker stores** | `/var/lib/docker/` (watch this fill your disk) |
+| Volumes (your database data) | `/var/lib/docker/volumes/` |
+| **Daemon config, log rotation** | `/etc/docker/daemon.json` |
+| Raw container logs | `/var/lib/docker/containers/<id>/<id>-json.log` |
+| Registry credentials | `~/.docker/config.json` |
+| Project files | `<project>/Dockerfile`, `docker-compose.yml`, `.dockerignore` |
+
+Container logs grow unbounded by default. Cap them in `/etc/docker/daemon.json`:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "3" }
+}
+```
+
+Then `sudo systemctl restart docker`. Unbounded container logs filling `/var/lib/docker` is one of the most common causes of a server dying at 3am.
+
+### Jenkins
+
+| What | Path |
+|---|---|
+| **JENKINS_HOME — back this up** | `/var/lib/jenkins/` |
+| First-login password | `/var/lib/jenkins/secrets/initialAdminPassword` |
+| Global config | `/var/lib/jenkins/config.xml` |
+| Job definitions | `/var/lib/jenkins/jobs/<job>/config.xml` |
+| **Build workspaces** | `/var/lib/jenkins/workspace/<job>/` |
+| Encrypted credentials | `/var/lib/jenkins/credentials.xml` |
+| Plugins | `/var/lib/jenkins/plugins/` |
+| Log | `/var/log/jenkins/jenkins.log` |
+| Port / JVM options override | `/etc/systemd/system/jenkins.service.d/override.conf` |
+| Pipeline definition | `<repo>/Jenkinsfile` |
+
+Old workspaces are the usual reason a Jenkins server runs out of disk. Add `cleanWs()` to your pipeline's `post` block.
+
+### SSH
+
+| What | Path |
+|---|---|
+| Server config | `/etc/ssh/sshd_config` |
+| Your private / public key | `~/.ssh/id_ed25519`, `id_ed25519.pub` |
+| **Keys allowed to log in** | `~/.ssh/authorized_keys` |
+| Client shortcuts | `~/.ssh/config` |
+| Fingerprints of hosts you've visited | `~/.ssh/known_hosts` |
+| Login attempts (incl. failures) | `/var/log/auth.log` |
+
+`~/.ssh` must be `700` and `authorized_keys` `600`, or SSH silently refuses the key.
+
+### Databases
+
+| What | Path |
+|---|---|
+| MySQL config | `/etc/mysql/mysql.conf.d/mysqld.cnf` |
+| MySQL data | `/var/lib/mysql/` |
+| MySQL error log | `/var/log/mysql/error.log` |
+| Postgres config | `/etc/postgresql/16/main/postgresql.conf` |
+| **Postgres auth rules** | `/etc/postgresql/16/main/pg_hba.conf` |
+| Postgres data | `/var/lib/postgresql/16/main/` |
+| Postgres logs | `/var/log/postgresql/` |
+
+Most "password authentication failed" errors in Postgres are `pg_hba.conf`, not a wrong password.
+
+### System-wide
+
+| What | Path |
+|---|---|
+| General system log | `/var/log/syslog` |
+| Auth / sudo / SSH events | `/var/log/auth.log` |
+| Kernel messages, OOM kills | `dmesg -T` |
+| Static hostname mappings | `/etc/hosts` |
+| DNS resolvers | `/etc/resolv.conf` |
+| Mounts at boot | `/etc/fstab` |
+| System-wide env vars | `/etc/environment` |
+| **Log rotation rules** | `/etc/logrotate.d/` |
+| System cron jobs | `/etc/cron.d/`, `/etc/crontab` |
+| User cron jobs | `/var/spool/cron/crontabs/<user>` |
+| Firewall rules | `/etc/ufw/` |
+| Your application code | `/var/www/<app>` (convention, not a rule) |
+
+When a disk fills up, check these first:
+
+```bash
+sudo du -sh /var/log/* | sort -rh | head          # runaway logs
+sudo du -sh /var/lib/docker/* | sort -rh | head   # Docker images and volumes
+sudo du -sh /var/lib/jenkins/workspace/* | sort -rh | head
+sudo journalctl --disk-usage
+sudo journalctl --vacuum-time=7d                  # trim systemd journal
+```
+
+### Amazon Linux / RHEL / CentOS differences
+
+| Ubuntu / Debian | Amazon Linux / RHEL |
+|---|---|
+| Package name `apache2` | `httpd` |
+| `/etc/apache2/sites-available/` | `/etc/httpd/conf.d/*.conf` (no `sites-available`) |
+| `/var/log/apache2/` | `/var/log/httpd/` |
+| `a2ensite` / `a2enmod` | no equivalent — drop `.conf` files into `conf.d/` |
+| `/etc/nginx/sites-available/` | `/etc/nginx/conf.d/*.conf` |
+| `apt` | `yum` / `dnf` |
+| Web user `www-data` | `apache` or `nginx` |
+| SSH user `ubuntu` | `ec2-user` |
+| `/var/log/syslog` | `/var/log/messages` |
+
+Ubuntu's `sites-available` / `sites-enabled` split does not exist on RHEL-family systems. Tutorials that assume it will fail there.
+
+---
+
+## 4. Nginx — the front door for all three stacks
 
 ```bash
 sudo nano /etc/nginx/sites-available/myapp     # write config here
@@ -136,7 +363,7 @@ Pointing `root` at the project folder instead of `public/` exposes your `.env` f
 
 ---
 
-## 4. Apache — the other front door
+## 5. Apache — the other front door
 
 Apache and Nginx do the same job. Pick one. **Never run both on port 80** — the second one fails to start and you'll waste an hour on it.
 
@@ -248,7 +475,7 @@ sudo certbot --apache -d myapp.com -d www.myapp.com
 
 ---
 
-## 5. PHP / Laravel deployment
+## 6. PHP / Laravel deployment
 
 ```bash
 # Install stack
@@ -321,7 +548,7 @@ sudo journalctl -u laravel-worker -f
 
 ---
 
-## 6. Node.js deployment
+## 7. Node.js deployment
 
 ```bash
 # Install Node via nvm (avoid apt's outdated version)
@@ -368,7 +595,7 @@ pm2 flush                                  # clear logs when they get large
 
 ---
 
-## 7. React / Vue / Angular deployment
+## 8. React / Vue / Angular deployment
 
 ```bash
 # Build (do this in CI, not on a small production server — builds are memory-hungry)
@@ -394,7 +621,7 @@ Environment variables are baked in at **build** time, not runtime. Changing `VIT
 
 ---
 
-## 8. SSL / HTTPS with Let's Encrypt
+## 9. SSL / HTTPS with Let's Encrypt
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
@@ -408,7 +635,7 @@ Point your DNS A record at the server **before** running certbot — validation 
 
 ---
 
-## 9. Databases
+## 10. Databases
 
 ```bash
 # MySQL
@@ -430,7 +657,7 @@ Take a backup before every migration. No exceptions.
 
 ---
 
-## 10. Docker — one workflow for every stack
+## 11. Docker — one workflow for every stack
 
 ```bash
 # Install
@@ -488,7 +715,7 @@ Tag with a git SHA or version number, never only `latest` — you cannot roll ba
 
 ---
 
-## 11. Troubleshooting a broken deployment
+## 12. Troubleshooting a broken deployment
 
 Work through this in order:
 
@@ -536,7 +763,7 @@ Interpreting the common failures:
 
 ---
 
-## 12. Permissions cheat sheet
+## 13. Permissions cheat sheet
 
 ```bash
 sudo chown -R www-data:www-data /var/www/myapp     # web server owns web files
@@ -549,7 +776,7 @@ Never `chmod 777`. It fixes the symptom, opens a hole, and marks you as a beginn
 
 ---
 
-## 13. Safe deploy and rollback
+## 14. Safe deploy and rollback
 
 ```bash
 # Tag every release so rollback is one command
@@ -571,9 +798,9 @@ A deploy you can't reverse in under five minutes isn't finished. Plan the rollba
 
 ---
 
-## 14. Jenkins — automating all of the above
+## 15. Jenkins — automating all of the above
 
-Jenkins is what runs your deploy steps automatically on every push. Everything in sections 1–13 becomes a stage in a pipeline.
+Jenkins is what runs your deploy steps automatically on every push. Everything in sections 1–14 becomes a stage in a pipeline.
 
 ### Install
 
@@ -781,7 +1008,7 @@ Learn Jenkins because your job needs it. Learn GitHub Actions too, because it's 
 
 ---
 
-## 15. Commands that need a second look
+## 16. Commands that need a second look
 
 | Command | Why |
 |---|---|
@@ -800,14 +1027,14 @@ Learn Jenkins because your job needs it. Learn GitHub Actions too, because it's 
 
 ---
 
-## 16. Next step: stop doing this by hand
+## 17. Next step: stop doing this by hand
 
 Everything above is the manual version. It teaches you what's happening, and you should do it manually a few times. But manual deployment doesn't scale and doesn't repeat reliably.
 
 The progression from here:
 
 1. **Bash script** — wrap your deploy steps in one file with `set -euo pipefail`
-2. **Jenkins or GitHub Actions** — run that script automatically on every push to `main` (section 14)
+2. **Jenkins or GitHub Actions** — run that script automatically on every push to `main` (section 15)
 3. **Docker** — make "works on my machine" mean something
 4. **Terraform** — the server itself becomes code
 5. **Kubernetes / ECS** — orchestrate many containers
